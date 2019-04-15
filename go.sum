@@ -190,6 +190,8 @@ github.com/xiang90/probing v0.0.0-20160813154853-07dd2e8dfe18/go.mod h1:UETIi67q
 github.com/xlab/treeprint v0.0.0-20161029104018-1d6e34225557/go.mod h1:ce1O1j6UtZfjr22oyGxGLbauSBp2YVXpARAosm7dHBg=
 github.com/zclconf/go-cty v0.0.0-20180302160414-49fa5e03c418 h1:uZKhc0PzQtIg+6+BqQU1m0zzcIgY2hHJk/Xwf00QUNw=
 github.com/zclconf/go-cty v0.0.0-20180302160414-49fa5e03c418/go.mod h1:LnDKxj8gN4aatfXUqmUNooaDjvmDcLPbAN3hYBIVoJE=
+github.com/zlangbert/redis-enterprise-client-go v0.0.0-20190415035252-da16d37f8f1b h1:koEEBntXKGRNp0pATDXTQM81/TD8sGnCX+MEUHcWJ6w=
+github.com/zlangbert/redis-enterprise-client-go v0.0.0-20190415035252-da16d37f8f1b/go.mod h1:b79U+8sehEwNW6RhbB/wKfUtQKR82IZ32ewCMiYgyPk=
 golang.org/x/crypto v0.0.0-20180211211603-9de5f2eaf759 h1:6W75OzsrwJByqag5GxxtYVTVEyP+Sy+aLDUsJ9CD8OU=
 golang.org/x/crypto v0.0.0-20180211211603-9de5f2eaf759/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
 golang.org/x/net v0.0.0-20171004034648-a04bdaca5b32 h1:NjAulLPqFTaOxQu5S4qUMqscSu+mQdu+wMY0nfqSkuk=
