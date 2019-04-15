@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/hashicorp/terraform/helper/customdiff"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/helper/validation"
@@ -10,6 +12,7 @@ import (
 	"log"
 	"regexp"
 	"strconv"
+	"time"
 )
 
 func resourceDatabase() *schema.Resource {
@@ -63,6 +66,33 @@ func resourceDatabase() *schema.Resource {
 				),
 			},
 		},
+
+		CustomizeDiff: customdiff.All(
+
+			// "sharding" can go from disabled -> enabled
+			customdiff.ForceNewIfChange("sharding", func(old, new, meta interface{}) bool {
+				return new.(bool) == false && old.(bool) == true
+			}),
+
+			// "shard_count" can not be decreased
+			customdiff.ForceNewIfChange("shard_count", func(old, new, meta interface{}) bool {
+				return new.(int) < old.(int)
+			}),
+
+			// "shard_count" can only be increased in multiples of self
+			customdiff.ValidateChange("shard_count", func(old, new, meta interface{}) error {
+				if old.(int) <= 0 {
+					return nil
+				}
+				if new.(int) <= old.(int) {
+					return nil
+				}
+				if (new.(int) % old.(int)) != 0 {
+					return fmt.Errorf("new shard count must be a multiple of the old value: %d", old.(int))
+				}
+				return nil
+			}),
+		),
 	}
 }
 
@@ -225,6 +255,11 @@ func resourceDatabaseDelete(d *schema.ResourceData, m interface{}) error {
 		return errors.Wrapf(getClientError(err), "error deleting database %v", id)
 	}
 
+	err = waitForDeleteDatabase(meta, int32(id), d.Timeout(schema.TimeoutDelete))
+	if err != nil {
+		return errors.Wrap(err, "error waiting for database deletion")
+	}
+
 	return nil
 }
 
@@ -232,10 +267,48 @@ func refreshDatabaseStatus(meta *providerMeta, id int32) resource.StateRefreshFu
 	return func() (interface{}, string, error) {
 		database, _, err := meta.client.DatabasesApi.GetDatabase(meta.ctx, id)
 		if err != nil {
-			return 0, "", errors.Wrap(err, "error getting database during status refresh")
+			return nil, "", errors.Wrap(err, "error getting database during status refresh")
 		}
 		return database, string(database.Status), nil
 	}
+}
+
+func waitForDeleteDatabase(meta *providerMeta, id int32, timeout time.Duration) error {
+	stateConf := resource.StateChangeConf{
+		Pending: []string{string(redisenterprise.DELETE_PENDING)},
+		Target:  []string{""},
+		Timeout: timeout,
+		Refresh: refreshDatabaseStatus(meta, id),
+	}
+
+	database, err := stateConf.WaitForState()
+	if err != nil {
+
+		switch err := errors.Cause(err).(type) {
+		case redisenterprise.GenericOpenAPIError:
+
+			switch serviceErr := err.Model().(type) {
+			case redisenterprise.Error:
+
+				if serviceErr.ErrorCode == "db_not_exist" {
+					return nil
+				}
+
+				return makeServiceError(serviceErr)
+			default:
+				return err
+			}
+
+		default:
+			return err
+		}
+	}
+
+	if database == nil {
+		return nil
+	}
+
+	return err
 }
 
 func getClientError(err error) error {
@@ -249,15 +322,19 @@ func getClientError(err error) error {
 
 		switch serviceErr := err.Model().(type) {
 		default:
-			return errors.New(err.Error())
+			return err
 		case redisenterprise.Error:
-			if serviceErr.Description != "" {
-				return errors.New(serviceErr.Description)
-			} else if serviceErr.ErrorCode != "" {
-				return errors.New(serviceErr.ErrorCode)
-			} else {
-				return errors.New(err.Error())
-			}
+			return makeServiceError(serviceErr)
 		}
+	}
+}
+
+func makeServiceError(err redisenterprise.Error) error {
+	if err.Description != "" {
+		return errors.New(err.Description)
+	} else if err.ErrorCode != "" {
+		return errors.New(err.ErrorCode)
+	} else {
+		return errors.New("unknown service error")
 	}
 }
