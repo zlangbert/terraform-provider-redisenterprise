@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform/helper/validation"
 	"github.com/pkg/errors"
 	redisenterprise "github.com/zlangbert/redis-enterprise-client-go"
 	"log"
+	"regexp"
 	"strconv"
 )
 
@@ -40,30 +43,24 @@ func resourceDatabase() *schema.Resource {
 				Optional: true,
 			},
 			"sharding": {
-				Type:     schema.TypeMap,
+				Type:     schema.TypeBool,
 				Optional: true,
-				Elem: &schema.Resource{
-					Schema: map[string]*schema.Schema{
-						"enabled": {
-							Type:     schema.TypeBool,
-							Computed: true,
-						},
-						"shards": {
-							Type:     schema.TypeInt,
-							Optional: true,
-							Default:  1,
-						},
-						"placement": {
-							Type:     schema.TypeString,
-							Optional: true,
-							Default:  "dense",
-						},
-					},
-				},
-				Default: map[string]interface{}{
-					"count":     1,
-					"placement": "dense",
-				},
+				Default:  false,
+			},
+			"shard_count": {
+				Type:         schema.TypeInt,
+				Optional:     true,
+				Default:      1,
+				ValidateFunc: validation.IntBetween(1, 512),
+			},
+			"shard_placement": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Default:  "dense",
+				ValidateFunc: validation.StringMatch(
+					regexp.MustCompile(`dense|sparse`),
+					"shard placement policy should be one of 'dense' or 'sparse'",
+				),
 			},
 		},
 	}
@@ -108,18 +105,15 @@ func resourceDatabaseCreate(d *schema.ResourceData, m interface{}) error {
 	}
 
 	if v, ok := d.GetOk("sharding"); ok {
-		shardingConfig := v.(map[string]interface{})
+		db.Sharding = v.(bool)
+	}
 
-		shards, err := strconv.Atoi(shardingConfig["shards"].(string))
-		if err != nil {
-			return errors.Wrapf(err, "failed to parse sharding.shards value: %v", shardingConfig["shards"])
-		}
+	if v, ok := d.GetOk("shard_count"); ok {
+		db.ShardsCount = int32(v.(int))
+	}
 
-		if shards > 1 {
-			db.Sharding = true
-		}
-		db.ShardsCount = int32(shards)
-		db.ShardsPlacement = shardingConfig["placement"].(string)
+	if v, ok := d.GetOk("shard_placement"); ok {
+		db.ShardsPlacement = v.(string)
 	}
 
 	payload, _ := json.Marshal(db)
@@ -131,8 +125,18 @@ func resourceDatabaseCreate(d *schema.ResourceData, m interface{}) error {
 	}
 
 	log.Printf("[DEBUG] created database: %#v", database)
-
 	d.SetId(strconv.Itoa(int(database.Uid)))
+
+	stateConf := resource.StateChangeConf{
+		Pending: []string{string(redisenterprise.PENDING)},
+		Target:  []string{string(redisenterprise.ACTIVE)},
+		Timeout: d.Timeout(schema.TimeoutCreate),
+		Refresh: refreshDatabaseStatus(meta, database.Uid),
+	}
+	_, err = stateConf.WaitForState()
+	if err != nil {
+		return err
+	}
 
 	return resourceDatabaseRead(d, m)
 }
@@ -153,12 +157,9 @@ func resourceDatabaseRead(d *schema.ResourceData, m interface{}) error {
 	_ = d.Set("port", database.Port)
 	_ = d.Set("memory_size", database.MemorySize)
 	_ = d.Set("replication", database.Replication)
-
-	_ = d.Set("sharding", map[string]interface{}{
-		"enabled":   database.Sharding,
-		"shards":    int(database.ShardsCount),
-		"placement": database.ShardsPlacement,
-	})
+	_ = d.Set("sharding", database.Sharding)
+	_ = d.Set("shard_count", database.ShardsCount)
+	_ = d.Set("shard_placement", database.ShardsPlacement)
 
 	return nil
 }
@@ -181,12 +182,35 @@ func resourceDatabaseUpdate(d *schema.ResourceData, m interface{}) error {
 		db.Replication = d.Get("replication").(bool)
 	}
 
+	if d.HasChange("sharding") {
+		db.Sharding = d.Get("sharding").(bool)
+	}
+
+	if d.HasChange("shard_count") {
+		db.ShardsCount = int32(d.Get("shard_count").(int))
+	}
+
+	if d.HasChange("shard_placement") {
+		db.ShardsPlacement = d.Get("shard_count").(string)
+	}
+
 	payload, _ := json.Marshal(db)
 	log.Printf("[DEBUG] updating database with payload: %s", payload)
 
 	_, _, err := meta.client.DatabasesApi.UpdateDatabase(meta.ctx, int32(id), db)
 	if err != nil {
 		return errors.Wrapf(getClientError(err), "error updating database %v", id)
+	}
+
+	stateConf := resource.StateChangeConf{
+		Pending: []string{string(redisenterprise.ACTIVE_CHANGE_PENDING)},
+		Target:  []string{string(redisenterprise.ACTIVE)},
+		Timeout: d.Timeout(schema.TimeoutUpdate),
+		Refresh: refreshDatabaseStatus(meta, int32(id)),
+	}
+	_, err = stateConf.WaitForState()
+	if err != nil {
+		return err
 	}
 
 	return resourceDatabaseRead(d, m)
@@ -202,6 +226,16 @@ func resourceDatabaseDelete(d *schema.ResourceData, m interface{}) error {
 	}
 
 	return nil
+}
+
+func refreshDatabaseStatus(meta *providerMeta, id int32) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		database, _, err := meta.client.DatabasesApi.GetDatabase(meta.ctx, id)
+		if err != nil {
+			return 0, "", errors.Wrap(err, "error getting database during status refresh")
+		}
+		return database, string(database.Status), nil
+	}
 }
 
 func getClientError(err error) error {
